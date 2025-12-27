@@ -20,8 +20,8 @@ jobs:
         uses: Jimver/cuda-toolkit@v0.2.18
         with:
           cuda: '12.8.0'
-          install-cuDNN: false
-          sub-packages: 'nvcc,cudart,cuda_runtime_dev'  # 修正：数组→逗号分隔的字符串
+          # 删除无效的install-cuDNN参数
+          sub-packages: '["nvcc", "cudart", "cuda_runtime_dev"]'  # 修正：JSON格式字符串数组
 
       - name: Install PyTorch 2.7.0+cu128
         run: |
