@@ -11,69 +11,93 @@ jobs:
       matrix:
         os: [windows-2022]
         python-version: ['3.12']
-        torch-version: [2.9.1]  # 更新PyTorch版本到2.9.1
-        cuda-version: ['cu130']  # 更新CUDA版本到13.0
+        torch-version: [2.9.1]
+        cuda-version: ['cu130']
+        numpy-version: ['2.4.0']  # 新增numpy版本矩阵，便于维护
 
     steps:
-      - uses: actions/checkout@v4  # 升级actions/checkout到最新稳定版
+      - uses: actions/checkout@v4
 
       - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5  # 升级到最新版action
+        uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-          cache: 'pip'  # 启用pip缓存加速依赖安装
+          cache: 'pip'
 
-      - name: Upgrade pip and install dependencies
+      - name: Upgrade pip and install core dependencies (with numpy ${{ matrix.numpy-version }})
         run: |
-          pip install --upgrade pip setuptools wheel
-          pip install ninja pybind11  # 保留nvdiffrast必需的编译依赖
-          # 安装Visual Studio相关构建工具（确保C++编译环境完整）
-          pip install setuptools-scm  # 可选：如果项目使用scm版本控制
+          # 强制升级pip到最新版，适配numpy 2.4.0安装
+          pip install --upgrade pip>=24.0
+          pip install --upgrade setuptools wheel setuptools-scm
+          # 安装指定版本numpy 2.4.0（核心适配点）
+          pip install numpy==${{ matrix.numpy-version }}
+          # 安装nvdiffrast编译必需依赖，确保和numpy 2.4.0兼容
+          pip install ninja pybind11
+          # 验证numpy版本和完整性
+          python -c "import numpy; print(f'NumPy version: {numpy.__version__}'); assert numpy.__version__ == '${{ matrix.numpy-version }}'"
+        shell: bash
 
       - name: Install CUDA ${{ matrix.cuda-version }}
         if: ${{ matrix.cuda-version != 'cpu' }}
         run: |
+          # 增加脚本执行权限，避免Windows bash权限问题
+          chmod +x .github/workflows/cuda/${{ matrix.cuda-version }}-${{ runner.os }}.sh
           bash .github/workflows/cuda/${{ matrix.cuda-version }}-${{ runner.os }}.sh
         shell: bash
+        timeout-minutes: 20  # CUDA安装较慢，增加超时保护
 
       - name: Install PyTorch ${{ matrix.torch-version }}+${{ matrix.cuda-version }}
         run: |
+          # 安装PyTorch，确保和numpy 2.4.0兼容
           pip install torch==${{ matrix.torch-version }}+${{ matrix.cuda-version }} --index-url https://download.pytorch.org/whl/${{ matrix.cuda-version }}
-          python -c "import torch; print('PyTorch version:', torch.__version__)"
-          python -c "import torch; print('CUDA version:', torch.version.cuda)"
-          python -c "import torch; print('CUDA available:', torch.cuda.is_available())"  # 验证CUDA可用性
+          # 验证核心依赖版本
+          python -c "import torch; print(f'PyTorch version: {torch.__version__}')"
+          python -c "import torch; print(f'CUDA version: {torch.version.cuda}')"
+          python -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}')"
+          python -c "import numpy, torch; print(f'NumPy + PyTorch compatibility check: {torch.from_numpy(numpy.array([1]))}')"
+        shell: bash
 
       - name: Patch PyTorch headers (Windows specific)
         if: ${{ runner.os == 'Windows' }}
         run: |
           Torch_DIR=$(python -c 'import os; import torch; print(os.path.dirname(torch.__file__))')
-          # 修复Windows下可能的编译冲突
           sed -i '31,38c\TORCH_API void lazy_init_num_threads();' "$Torch_DIR/include/ATen/Parallel.h"
         shell: bash
 
-      - name: Build wheel with C++ extensions
+      - name: Build wheel with C++ extensions (CUDA130 + numpy 2.4.0)
         if: ${{ matrix.cuda-version != 'cpu' }}
         run: |
-          # 加载CUDA环境变量
+          # 加载CUDA环境（确保CUDA_HOME全局导出）
+          chmod +x .github/workflows/cuda/${{ matrix.cuda-version }}-${{ runner.os }}-env.sh
           source .github/workflows/cuda/${{ matrix.cuda-version }}-${{ runner.os }}-env.sh
-          # 强制CUDA编译并指定输出目录，确保C++源码被包含
-          FORCE_CUDA=1 python setup.py bdist_wheel --dist-dir=dist
-          # 验证wheel包含的文件（检查是否有C++编译的扩展）
+          # 显式指定CUDA_HOME，双重保障
+          export CUDA_HOME="/c/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v13.0"
+          # 强制CUDA编译，关联numpy 2.4.0
+          FORCE_CUDA=1 NUMPY_INCLUDE_DIR=$(python -c "import numpy; print(numpy.get_include())") python setup.py bdist_wheel --dist-dir=dist
+          # 验证编译产物
           ls -la dist/
-          pip wheel --no-deps --wheel-dir=dist .  # 二次确认构建
+          pip wheel --no-deps --wheel-dir=dist .
         shell: bash
 
-      - name: Verify wheel contents
+      - name: Verify wheel contents (with numpy ${{ matrix.numpy-version }})
         run: |
-          # 安装构建好的wheel
+          # 安装编译好的wheel
           pip install dist/*.whl
-          # 验证C++扩展是否正确加载
-          python -c "import nvdiffrast.torch as dr; print('nvdiffrast loaded successfully')"
+          # 验证nvdiffrast + numpy 2.4.0 + PyTorch协同工作
+          python -c "
+          import numpy as np
+          import torch
+          import nvdiffrast.torch as dr
+          # 基础功能验证
+          assert np.__version__ == '${{ matrix.numpy-version }}'
+          ctx = dr.RasterizeCudaContext()
+          print('nvdiffrast loaded successfully with numpy', np.__version__)
+          "
         shell: bash
 
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v4
         with:
-          name: nvdiffrast-cp312-cu130-win2022
+          name: nvdiffrast-cp312-cu130-numpy240-win2022
           path: dist/*.whl
-          retention-days: 30  # 设置artifact保留时间
+          retention-days: 30
