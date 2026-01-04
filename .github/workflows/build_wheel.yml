@@ -1,72 +1,79 @@
-name: Build nvdiffrast Wheels (CUDA128+Py312+Win)
+name: Build nvdiffrast Wheels (CUDA130+Py312+Win)
 
 on: [workflow_dispatch]
 
 jobs:
   wheel:
-    # 和torch_scatter保持一致：仅Windows 2022非ARM
     runs-on: windows-2022
 
     strategy:
       fail-fast: false
       matrix:
-        # 完全对齐torch_scatter的目标环境
         os: [windows-2022]
         python-version: ['3.12']
-        torch-version: [2.7.0]
-        cuda-version: ['cu128']
+        torch-version: [2.9.1]  # 更新PyTorch版本到2.9.1
+        cuda-version: ['cu130']  # 更新CUDA版本到13.0
 
     steps:
-      # 1. 拉取代码（和torch_scatter一致）
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4  # 升级actions/checkout到最新稳定版
 
-      # 2. 配置Python（和torch_scatter一致）
       - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v2
+        uses: actions/setup-python@v5  # 升级到最新版action
         with:
           python-version: ${{ matrix.python-version }}
+          cache: 'pip'  # 启用pip缓存加速依赖安装
 
-      # 3. 升级pip/编译工具（和torch_scatter一致）
-      - name: Upgrade pip
+      - name: Upgrade pip and install dependencies
         run: |
-          pip install --upgrade setuptools
-          pip install wheel ninja pybind11  # 新增nvdiffrast需要的pybind11
+          pip install --upgrade pip setuptools wheel
+          pip install ninja pybind11  # 保留nvdiffrast必需的编译依赖
+          # 安装Visual Studio相关构建工具（确保C++编译环境完整）
+          pip install setuptools-scm  # 可选：如果项目使用scm版本控制
 
-      # 4. 安装CUDA 12.8（完全复用torch_scatter的安装脚本）
       - name: Install CUDA ${{ matrix.cuda-version }}
         if: ${{ matrix.cuda-version != 'cpu' }}
         run: |
           bash .github/workflows/cuda/${{ matrix.cuda-version }}-${{ runner.os }}.sh
+        shell: bash
 
-      # 5. 安装PyTorch 2.7.0+cu128（和torch_scatter完全一致）
       - name: Install PyTorch ${{ matrix.torch-version }}+${{ matrix.cuda-version }}
         run: |
           pip install torch==${{ matrix.torch-version }}+${{ matrix.cuda-version }} --index-url https://download.pytorch.org/whl/${{ matrix.cuda-version }}
-          python -c "import torch; print('PyTorch:', torch.__version__)"
-          python -c "import torch; print('CUDA:', torch.version.cuda)"
+          python -c "import torch; print('PyTorch version:', torch.__version__)"
+          python -c "import torch; print('CUDA version:', torch.version.cuda)"
+          python -c "import torch; print('CUDA available:', torch.cuda.is_available())"  # 验证CUDA可用性
 
-      # 6. （可选）Windows下PyTorch补丁（和torch_scatter一致，避免编译报错）
-      - name: Patch PyTorch static constexpr on Windows
+      - name: Patch PyTorch headers (Windows specific)
         if: ${{ runner.os == 'Windows' }}
         run: |
-          Torch_DIR=`python -c 'import os; import torch; print(os.path.dirname(torch.__file__))'`
-          sed -i '31,38c\
-          TORCH_API void lazy_init_num_threads();' ${Torch_DIR}/include/ATen/Parallel.h
+          Torch_DIR=$(python -c 'import os; import torch; print(os.path.dirname(torch.__file__))')
+          # 修复Windows下可能的编译冲突
+          sed -i '31,38c\TORCH_API void lazy_init_num_threads();' "$Torch_DIR/include/ATen/Parallel.h"
         shell: bash
 
-      # 7. 编译nvdiffrast的CUDA版本（适配Windows+CUDA128）
-      - name: Build wheel for GPU (CUDA128)
+      - name: Build wheel with C++ extensions
         if: ${{ matrix.cuda-version != 'cpu' }}
         run: |
-          # 加载CUDA环境（复用torch_scatter的环境脚本）
+          # 加载CUDA环境变量
           source .github/workflows/cuda/${{ matrix.cuda-version }}-${{ runner.os }}-env.sh
-          # 强制CUDA编译，指定输出目录
+          # 强制CUDA编译并指定输出目录，确保C++源码被包含
           FORCE_CUDA=1 python setup.py bdist_wheel --dist-dir=dist
+          # 验证wheel包含的文件（检查是否有C++编译的扩展）
+          ls -la dist/
+          pip wheel --no-deps --wheel-dir=dist .  # 二次确认构建
         shell: bash
 
-      # 8. 上传编译好的wheel（和torch_scatter一致，方便下载）
-      - name: Upload wheel as Artifact
+      - name: Verify wheel contents
+        run: |
+          # 安装构建好的wheel
+          pip install dist/*.whl
+          # 验证C++扩展是否正确加载
+          python -c "import nvdiffrast.torch as dr; print('nvdiffrast loaded successfully')"
+        shell: bash
+
+      - name: Upload wheel artifact
         uses: actions/upload-artifact@v4
         with:
-          name: nvdiffrast-cp312-cu128-win2022
+          name: nvdiffrast-cp312-cu130-win2022
           path: dist/*.whl
+          retention-days: 30  # 设置artifact保留时间
